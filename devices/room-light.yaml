@@ -330,7 +330,8 @@ text:
   # Changing the bridge clears the key, so a LAN user cannot point the board at their own host and receive the
   # key there (certificates are not checked). set_action runs before the new value is stored, so .state still
   # holds the old bridge here; optimistic + restore_value still publish and save the new bridge afterwards.
-  # Restoring from flash at boot does not run set_action. The first entry (old value empty) keeps the key.
+  # Restoring from flash at boot does not run set_action. Any change, also the first entry, clears the key:
+  # always set the bridge first, then the key.
   - platform: template
     name: "Hue bridge"
     id: hue_bridge
@@ -342,7 +343,7 @@ text:
     entity_category: config
     set_action:
       - lambda: |-
-          if (!id(hue_bridge).state.empty() && x != id(hue_bridge).state && !id(hue_key).state.empty()) {
+          if (x != id(hue_bridge).state && !id(hue_key).state.empty()) {
             ESP_LOGW("hue", "Hue bridge changed: Hue key cleared, enter the Hue key again");
             auto call = id(hue_key).make_call();
             call.set_value("");
@@ -482,6 +483,15 @@ script:
               bool all_set = !host.empty() && !id(hue_key).state.empty() && !id(hue_room_id).state.empty() &&
                              !id(hue_up_light_id).state.empty() && !id(hue_plug_light_id).state.empty();
               if (all_set) id(hue_warned) = false;
+              // Hue ids are UUIDs: only letters, digits and '-'. Anything else (for example "../") could point the
+              // request with the real key at a different bridge resource, so it is refused. The text "pattern"
+              // option is only a browser hint in 2026.9.1 (text_call.cpp checks length only), hence this check.
+              for (char c : res) {
+                if (!isalnum((unsigned char) c) && c != '-') {
+                  ESP_LOGW("hue", "Hue id contains a character other than letters, digits or '-': request skipped");
+                  return false;
+                }
+              }
               if (!host.empty() && !id(hue_key).state.empty() && !res.empty()) return true;
               if (!id(hue_warned)) {
                 ESP_LOGW("hue", "Hue settings missing (Hue bridge, Hue key or a Hue id is empty): Hue commands are skipped");
