@@ -12,14 +12,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Firmware version to build (normally an existing release tag, for example v2026.11.24-1)"
+        description: "Existing git tag to build, for example v2026.11.24-1 (the branch is never built)"
         required: true
         type: string
 
+# Read-only by default. Only the deploy job gets the Pages permissions.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -33,8 +32,10 @@ jobs:
       release_url: ${{ steps.meta.outputs.release_url }}
       devices: ${{ steps.devices.outputs.devices }}
     steps:
+      # Full history and all tags, so the tag can be checked below (works for private repos too).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Version and release page
@@ -52,6 +53,13 @@ jobs:
             echo "::error::Tag '$tag' is not allowed. Use something like v2026.11.24-1."
             exit 1
           fi
+          # A manual run must build an existing tag, never the branch it was started from.
+          if ! git rev-parse -q --verify "refs/tags/$tag^{commit}" > /dev/null; then
+            echo "::error::Tag '$tag' does not exist in $REPO. Create the tag (or the release) first."
+            exit 1
+          fi
+          # Read the device list from the tag, not from the branch.
+          git checkout -q --detach "refs/tags/$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "release_url=$SERVER_URL/$REPO/releases/tag/$tag" >> "$GITHUB_OUTPUT"
 
@@ -76,6 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
           persist-credentials: false
 
       - name: Build firmware
@@ -132,6 +141,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

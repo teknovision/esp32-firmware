@@ -35,11 +35,9 @@ esp32:
 
 logger:
 
-# Home Assistant can be added later without reflashing: the native API is already on.
-api:
-  # No Home Assistant connects yet. The default (15min) reboots the board every 15 minutes when no client
-  # connects (esphome.io/components/api), which wiped the "Room occupied" countdown on 12 Nov 2026.
-  reboot_timeout: 0s
+# No native API on purpose: in ESPHome 2026.9.1 the API sends text states unmasked, so any LAN client could read
+# the "Hue key". Without an api block there is also no 15 min "no client" reboot (that reboot wiped the
+# "Room occupied" countdown on 12 Nov 2026). Adding Home Assistant later needs a new API design first.
 
 # OTA, Wi-Fi, captive portal and http_request come from the two packages above.
 
@@ -329,6 +327,10 @@ number:
 # either length makes the board forget the value (it must then be typed in again). Keep them fixed.
 # "Hue key" is a password field: the web page and its event stream only ever show "********".
 text:
+  # Changing the bridge clears the key, so a LAN user cannot point the board at their own host and receive the
+  # key there (certificates are not checked). set_action runs before the new value is stored, so .state still
+  # holds the old bridge here; optimistic + restore_value still publish and save the new bridge afterwards.
+  # Restoring from flash at boot does not run set_action. The first entry (old value empty) keeps the key.
   - platform: template
     name: "Hue bridge"
     id: hue_bridge
@@ -338,6 +340,14 @@ text:
     optimistic: true
     restore_value: true
     entity_category: config
+    set_action:
+      - lambda: |-
+          if (!id(hue_bridge).state.empty() && x != id(hue_bridge).state && !id(hue_key).state.empty()) {
+            ESP_LOGW("hue", "Hue bridge changed: Hue key cleared, enter the Hue key again");
+            auto call = id(hue_key).make_call();
+            call.set_value("");
+            call.perform();
+          }
   - platform: template
     name: "Hue key"
     id: hue_key
@@ -437,17 +447,22 @@ globals:
   - id: stage_bri
     type: int
     initial_value: '0'
-  # True after the "Hue settings missing" warning was logged once (reset when the settings are complete).
+  # True after the "Hue settings missing" warning was logged once (reset only when all five Hue settings are set).
   - id: hue_warned
     type: bool
     initial_value: 'false'
+  # "Hue bridge" without a leading https:// or http:// and without trailing "/" (set by hue_put before each request).
+  - id: hue_host
+    type: std::string
+    initial_value: '""'
 
 script:
   # The one place that talks to the Hue bridge. target: 0 = room (grouped_light), 1 = Studio Up lamp,
   # 2 = plug lamp. The URL is https://<Hue bridge>/clip/v2/resource/grouped_light/<Hue room id> or
-  # .../resource/light/<lamp id>, the key goes in the hue-application-key header. Callers run "script.wait"
-  # right after, so commands and state updates keep the same order as when the request was inline.
-  # If the bridge, the key or the needed id is empty, nothing is sent and one warning is logged.
+  # .../resource/light/<lamp id> (a typed https:// or trailing / on the bridge is dropped), the key goes in the
+  # hue-application-key header. Callers run "script.wait" right after, so commands and state updates keep the
+  # same order as when the request was inline. If the bridge, the key or the needed id is empty, nothing is
+  # sent and one warning is logged; it can show again only after all five Hue settings were complete once.
   - id: hue_put
     mode: queued
     parameters:
@@ -457,12 +472,17 @@ script:
       - if:
           condition:
             lambda: |-
+              std::string host = id(hue_bridge).state;
+              if (host.rfind("https://", 0) == 0) host.erase(0, 8);
+              else if (host.rfind("http://", 0) == 0) host.erase(0, 7);
+              while (!host.empty() && host.back() == '/') host.pop_back();
+              id(hue_host) = host;
               const std::string &res = target == 1 ? id(hue_up_light_id).state
                                      : (target == 2 ? id(hue_plug_light_id).state : id(hue_room_id).state);
-              if (!id(hue_bridge).state.empty() && !id(hue_key).state.empty() && !res.empty()) {
-                id(hue_warned) = false;
-                return true;
-              }
+              bool all_set = !host.empty() && !id(hue_key).state.empty() && !id(hue_room_id).state.empty() &&
+                             !id(hue_up_light_id).state.empty() && !id(hue_plug_light_id).state.empty();
+              if (all_set) id(hue_warned) = false;
+              if (!host.empty() && !id(hue_key).state.empty() && !res.empty()) return true;
               if (!id(hue_warned)) {
                 ESP_LOGW("hue", "Hue settings missing (Hue bridge, Hue key or a Hue id is empty): Hue commands are skipped");
                 id(hue_warned) = true;
@@ -472,7 +492,7 @@ script:
             - http_request.send:
                 method: PUT
                 url: !lambda |-
-                  std::string url = "https://" + id(hue_bridge).state + "/clip/v2/resource/";
+                  std::string url = "https://" + id(hue_host) + "/clip/v2/resource/";
                   if (target == 1) return url + "light/" + id(hue_up_light_id).state;
                   if (target == 2) return url + "light/" + id(hue_plug_light_id).state;
                   return url + "grouped_light/" + id(hue_room_id).state;
