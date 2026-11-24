@@ -1,0 +1,14 @@
+# Never commit secrets (this repo should not need any)
+secrets.yaml
+
+# ESPHome build folders (created next to each device yaml)
+.esphome/
+
+# Build output
+build/
+site/
+*.bin
+*.elf
+
+# Python virtual environments
+.venv/

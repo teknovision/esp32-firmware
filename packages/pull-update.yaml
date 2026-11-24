@@ -1,0 +1,54 @@
+# Shared package: the device pulls its own firmware updates from a manifest URL (no push OTA, no OTA password).
+# The device must set these substitutions: project_name (needs a dot, for example "teknovision.lighty")
+# and update_manifest_url. Optional: fw_version (CI sets it to the release tag), verify_ssl.
+#
+# How an update is found: the "Firmware" entity reads the manifest every 6 h. An update is available when the
+# manifest "version" is a different string from fw_version below (exact compare, not "newer than").
+
+substitutions:
+  fw_version: "dev"
+  verify_ssl: "true"
+
+esphome:
+  project:
+    name: ${project_name}
+    version: ${fw_version}
+
+http_request:
+  verify_ssl: ${verify_ssl}
+  timeout: 10s
+  watchdog_timeout: 15s
+
+# Only pull updates. There is deliberately no "platform: esphome" OTA: without a password it would accept
+# firmware from anyone on the LAN.
+ota:
+  - platform: http_request
+
+update:
+  - platform: http_request
+    id: firmware_update
+    name: "Firmware"
+    source: ${update_manifest_url}
+    update_interval: 6h
+    on_update_available:
+      - if:
+          condition:
+            switch.is_on: auto_update
+          then:
+            - logger.log: "New firmware found, Auto update is on: installing"
+            - update.perform: firmware_update
+          else:
+            - logger.log: "New firmware found, Auto update is off: press Install on the Firmware entity"
+
+switch:
+  - platform: template
+    id: auto_update
+    name: "Auto update"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+button:
+  - platform: template
+    name: "Check for update"
+    on_press:
+      - update.check: firmware_update

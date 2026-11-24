@@ -1,0 +1,807 @@
+# Room light sensor -> Hue (direct, no Home Assistant needed). Device nickname: Lighty.
+# Parts: ESP32 NodeMCU (CH340) + VEML7700 light + BME280 temp/humidity + LD2410C radar.
+# Bench note: keep the "Hue control" switch OFF until the readings look right.
+#
+# No secrets in this file. Wi-Fi is entered once through the "room-light-setup" hotspot, the Hue settings
+# on the web page (http://room-light.local, section Configuration). Firmware updates are pulled from GitHub Pages.
+# Do NOT rename any entity: stored slider and text values are found by the entity name.
+
+substitutions:
+  name: room-light
+  friendly_name: Room Light
+  lux_on_below: "40"      # lights come ON when the room stays darker than this
+  lux_off_above: "120"    # lights go OFF when the room stays brighter than this (gap prevents flicker)
+  allowed_from_hour: "16" # only switch ON between these hours (Europe/Zurich)
+  allowed_to_hour: "23"
+  project_name: "teknovision.lighty"
+  update_manifest_url: "https://teknovision.github.io/esp32-firmware/firmware/room-light/manifest.json"
+  # The Hue bridge uses its own private certificate, so certificate checks are off. http_request has one
+  # verify_ssl for the whole device, so this ALSO means the firmware download from GitHub Pages is not
+  # certificate-checked. The MD5 in the manifest only proves the file arrived whole, not who made it.
+  verify_ssl: "false"
+
+packages:
+  pull_update: !include ../packages/pull-update.yaml
+  runtime_wifi: !include ../packages/runtime-wifi.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+# Home Assistant can be added later without reflashing: the native API is already on.
+api:
+  # No Home Assistant connects yet. The default (15min) reboots the board every 15 minutes when no client
+  # connects (esphome.io/components/api), which wiped the "Room occupied" countdown on 12 Nov 2026.
+  reboot_timeout: 0s
+
+# OTA, Wi-Fi, captive portal and http_request come from the two packages above.
+
+# Small status page on the board itself: http://room-light.local ("ota: false" comes from runtime-wifi.yaml)
+web_server:
+  port: 80
+  version: 3   # Home Assistant-style page; tap a sensor to see its history graph (esphome.io/components/web_server)
+
+time:
+  - platform: sntp
+    id: local_time
+    timezone: Europe/Zurich
+
+# Wires: VEML7700 and BME280 share the same 4 wires. SDA = GPIO21, SCL = GPIO22.
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true   # the boot log lists the addresses found: VEML7700 = 0x10, BME280 = 0x76 or 0x77
+
+sensor:
+  - platform: veml7700
+    address: 0x10
+    update_interval: 2s   # was 10s; faster live view on the web page
+    auto_mode: true
+    ambient_light:
+      name: "Ambient light"
+      id: lux
+      filters:
+        - sliding_window_moving_average:
+            window_size: 6
+            send_every: 1
+
+  - platform: bme280_i2c
+    address: 0x76     # if the boot log shows 0x77, change this
+    update_interval: 10s  # was 60s; faster live view on the web page
+    temperature:
+      name: "Temperature"
+      id: room_temp
+    humidity:
+      name: "Humidity"
+      id: room_humidity
+    pressure:
+      name: "Pressure"
+
+  - platform: ld2410
+    moving_distance:
+      name: "Radar moving distance"
+    still_distance:
+      name: "Radar still distance"
+    detection_distance:
+      name: "Radar detection distance"
+    moving_energy:
+      name: "Radar move energy"
+    still_energy:
+      name: "Radar still energy"
+    # Per-gate energies (one gate = 0.75 m). Only filled while "Radar engineering mode" is on. Used for tuning.
+    g0:
+      move_energy:
+        name: "G0 move energy"
+      still_energy:
+        name: "G0 still energy"
+    g1:
+      move_energy:
+        name: "G1 move energy"
+      still_energy:
+        name: "G1 still energy"
+    g2:
+      move_energy:
+        name: "G2 move energy"
+      still_energy:
+        name: "G2 still energy"
+    g3:
+      move_energy:
+        name: "G3 move energy"
+      still_energy:
+        name: "G3 still energy"
+    g4:
+      move_energy:
+        name: "G4 move energy"
+      still_energy:
+        name: "G4 still energy"
+    g5:
+      move_energy:
+        name: "G5 move energy"
+      still_energy:
+        name: "G5 still energy"
+    g6:
+      move_energy:
+        name: "G6 move energy"
+      still_energy:
+        name: "G6 still energy"
+    g7:
+      move_energy:
+        name: "G7 move energy"
+      still_energy:
+        name: "G7 still energy"
+    g8:
+      move_energy:
+        name: "G8 move energy"
+      still_energy:
+        name: "G8 still energy"
+
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    update_interval: 60s
+
+# Sliders on the web page (http://room-light.local). Values survive reboots.
+number:
+  # Radar tuning (stored inside the radar itself). A gate only reports a target above its threshold.
+  - platform: ld2410
+    timeout:
+      name: "Radar timeout"
+    max_move_distance_gate:
+      name: "Radar max move gate"
+    max_still_distance_gate:
+      name: "Radar max still gate"
+    g0:
+      move_threshold:
+        name: "G0 move threshold"
+      still_threshold:
+        name: "G0 still threshold"
+    g1:
+      move_threshold:
+        name: "G1 move threshold"
+      still_threshold:
+        name: "G1 still threshold"
+    g2:
+      move_threshold:
+        name: "G2 move threshold"
+      still_threshold:
+        name: "G2 still threshold"
+    g3:
+      move_threshold:
+        name: "G3 move threshold"
+      still_threshold:
+        name: "G3 still threshold"
+    g4:
+      move_threshold:
+        name: "G4 move threshold"
+      still_threshold:
+        name: "G4 still threshold"
+    g5:
+      move_threshold:
+        name: "G5 move threshold"
+      still_threshold:
+        name: "G5 still threshold"
+    g6:
+      move_threshold:
+        name: "G6 move threshold"
+      still_threshold:
+        name: "G6 still threshold"
+    g7:
+      move_threshold:
+        name: "G7 move threshold"
+      still_threshold:
+        name: "G7 still threshold"
+    g8:
+      move_threshold:
+        name: "G8 move threshold"
+      still_threshold:
+        name: "G8 still threshold"
+  - platform: template
+    name: "Lux ON below"
+    id: lux_on_below
+    unit_of_measurement: lx
+    min_value: 1
+    max_value: 500
+    step: 1
+    initial_value: ${lux_on_below}
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Lux OFF above"
+    id: lux_off_above
+    unit_of_measurement: lx
+    min_value: 1
+    max_value: 1000
+    step: 1
+    initial_value: ${lux_off_above}
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Dark delay"
+    id: dark_delay
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 900
+    step: 1
+    initial_value: 300
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Empty delay"
+    id: empty_delay
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 60
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Full brightness at"
+    id: bri_full_lux
+    unit_of_measurement: lx
+    min_value: 0
+    max_value: 500
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Minimum brightness at"
+    id: bri_min_lux
+    unit_of_measurement: lx
+    min_value: 1
+    max_value: 500
+    step: 1
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Minimum brightness"
+    id: bri_min_pct
+    unit_of_measurement: "%"
+    min_value: 1
+    max_value: 100
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    mode: slider
+  # Constant light: the board nudges the Hue brightness in small steps until the sensor reads this.
+  - platform: template
+    name: "Target light"
+    id: target_lux
+    unit_of_measurement: lx
+    min_value: 5
+    max_value: 300
+    step: 1
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+    mode: slider
+  # How much the plug lamp alone adds at the sensor. Constant light only switches the plug OFF when the
+  # room would still be bright enough without it, so it cannot flap on and off.
+  - platform: template
+    name: "Plug lamp adds"
+    id: plug_gain_lux
+    unit_of_measurement: lx
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Allowed from hour"
+    id: allowed_from
+    min_value: 0
+    max_value: 24
+    step: 1
+    initial_value: ${allowed_from_hour}
+    optimistic: true
+    restore_value: true
+    mode: slider
+  - platform: template
+    name: "Allowed to hour"
+    id: allowed_to
+    min_value: 0
+    max_value: 24
+    step: 1
+    initial_value: ${allowed_to_hour}
+    optimistic: true
+    restore_value: true
+    mode: slider
+
+# Hue settings, typed once on the web page (section Configuration) and kept in flash across reboots and updates.
+# WARNING: the stored value is found by the entity name plus min_length and max_length. Changing the name or
+# either length makes the board forget the value (it must then be typed in again). Keep them fixed.
+# "Hue key" is a password field: the web page and its event stream only ever show "********".
+text:
+  - platform: template
+    name: "Hue bridge"
+    id: hue_bridge
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Hue key"
+    id: hue_key
+    mode: password
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  # Room "Studio" (grouped_light id): used for room ON and room OFF.
+  - platform: template
+    name: "Hue room id"
+    id: hue_room_id
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  # Per-lamp light ids for "Constant light" staged control.
+  # Studio Up is dimmable and adds only 0 to 3 lx; Studio Switch is an on/off plug that adds 15 to 20 lx.
+  - platform: template
+    name: "Hue Up light id"
+    id: hue_up_light_id
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    name: "Hue plug light id"
+    id: hue_plug_light_id
+    mode: text
+    min_length: 0
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+switch:
+  - platform: ld2410
+    engineering_mode:
+      name: "Radar engineering mode"
+  - platform: template
+    name: "Hue control"
+    id: hue_control
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.execute: hue_on_if_wanted
+
+  - platform: template
+    name: "Lux brightness"
+    id: lux_brightness
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # Constant light wins over "Lux brightness" when on.
+  - platform: template
+    name: "Constant light"
+    id: constant_light
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+# Strip brightness follows the measured light while the strip is on.
+# 100 % at "Full brightness at", "Minimum brightness" % at "Minimum brightness at", linear in between.
+# Swap the two lux sliders to reverse the direction. The strip's own light is seen by the sensor,
+# so this settles to a balance point instead of staying at an end.
+globals:
+  - id: bri_value
+    type: int
+    initial_value: '0'
+  - id: last_bri_sent
+    type: int
+    initial_value: '0'
+  - id: hue_armed
+    type: bool
+    initial_value: 'false'
+  - id: last_bri_ms
+    type: uint32_t
+    initial_value: '0'
+  # Constant light staged control: what the board believes each Studio lamp is doing (not restored:
+  # after a reboot the next ON or OFF event puts reality and state back in line).
+  # last_bri_sent is the Studio Up brightness in this mode.
+  - id: plug_on
+    type: bool
+    initial_value: 'false'
+  - id: up_on
+    type: bool
+    initial_value: 'false'
+  # One decision per loop pass: 0 nothing, 1 plug OFF, 2 Studio Up dim to stage_bri, 3 room OFF,
+  # 4 Studio Up ON at 5 %, 5 plug ON.
+  - id: stage_action
+    type: int
+    initial_value: '0'
+  - id: stage_bri
+    type: int
+    initial_value: '0'
+  # True after the "Hue settings missing" warning was logged once (reset when the settings are complete).
+  - id: hue_warned
+    type: bool
+    initial_value: 'false'
+
+script:
+  # The one place that talks to the Hue bridge. target: 0 = room (grouped_light), 1 = Studio Up lamp,
+  # 2 = plug lamp. The URL is https://<Hue bridge>/clip/v2/resource/grouped_light/<Hue room id> or
+  # .../resource/light/<lamp id>, the key goes in the hue-application-key header. Callers run "script.wait"
+  # right after, so commands and state updates keep the same order as when the request was inline.
+  # If the bridge, the key or the needed id is empty, nothing is sent and one warning is logged.
+  - id: hue_put
+    mode: queued
+    parameters:
+      target: int
+      body: string
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const std::string &res = target == 1 ? id(hue_up_light_id).state
+                                     : (target == 2 ? id(hue_plug_light_id).state : id(hue_room_id).state);
+              if (!id(hue_bridge).state.empty() && !id(hue_key).state.empty() && !res.empty()) {
+                id(hue_warned) = false;
+                return true;
+              }
+              if (!id(hue_warned)) {
+                ESP_LOGW("hue", "Hue settings missing (Hue bridge, Hue key or a Hue id is empty): Hue commands are skipped");
+                id(hue_warned) = true;
+              }
+              return false;
+          then:
+            - http_request.send:
+                method: PUT
+                url: !lambda |-
+                  std::string url = "https://" + id(hue_bridge).state + "/clip/v2/resource/";
+                  if (target == 1) return url + "light/" + id(hue_up_light_id).state;
+                  if (target == 2) return url + "light/" + id(hue_plug_light_id).state;
+                  return url + "grouped_light/" + id(hue_room_id).state;
+                request_headers:
+                  Content-Type: application/json
+                  hue-application-key: !lambda 'return id(hue_key).state.c_str();'
+                body: !lambda 'return body;'
+
+  # Lights ON only when: Hue control on, room dark, somebody in the room, inside the allowed hours.
+  - id: hue_on_if_wanted
+    then:
+      - if:
+          condition:
+            lambda: |-
+              auto now = id(local_time).now();
+              return id(hue_armed) && id(hue_control).state && id(room_dark).state &&
+                     id(room_occupied).state && now.is_valid() &&
+                     now.hour >= id(allowed_from).state && now.hour < id(allowed_to).state;
+          then:
+            - if:
+                # Constant light with enough daylight already: keep both lamps OFF (the room may still be "dark"
+                # by the Lux ON below rule). The staged loop switches lamps on later if it gets darker.
+                condition:
+                  lambda: 'return id(constant_light).state && id(lux).has_state() && id(lux).state >= id(target_lux).state - 6.0f;'
+                then:
+                  - logger.log:
+                      format: "Dark and occupied, daylight reaches the target (lux %.0f): Hue room stays OFF"
+                      args: ['id(lux).state']
+                  - script.execute:
+                      id: hue_put
+                      target: 0
+                      body: '{"on":{"on":false}}'
+                  - script.wait: hue_put
+                  - lambda: |-
+                      id(plug_on) = false;
+                      id(up_on) = false;
+                      id(last_bri_sent) = 0;
+                else:
+                  - if:
+                      # Constant light and darker than the target: whole room ON at 50 %, then the loop takes over.
+                      condition:
+                        lambda: 'return id(constant_light).state && id(lux).has_state();'
+                      then:
+                        - logger.log: "Dark and occupied: switching Hue room ON"
+                        - script.execute:
+                            id: hue_put
+                            target: 0
+                            body: '{"on":{"on":true},"dimming":{"brightness":50}}'
+                        - script.wait: hue_put
+                        - lambda: |-
+                            id(plug_on) = true;
+                            id(up_on) = true;
+                            id(last_bri_sent) = 50;
+                            id(last_bri_ms) = millis();
+                      else:
+                        - logger.log: "Dark and occupied: switching Hue room ON"
+                        - script.execute: compute_brightness
+                        - script.execute:
+                            id: hue_put
+                            target: 0
+                            body: !lambda |-
+                              if (id(bri_value) <= 0) return std::string("{\"on\":{\"on\":true}}");
+                              return std::string("{\"on\":{\"on\":true},\"dimming\":{\"brightness\":") + std::to_string(id(bri_value)) + "}}";
+                        - script.wait: hue_put
+                        - lambda: 'id(last_bri_sent) = id(bri_value);'
+  - id: compute_brightness
+    then:
+      - lambda: |-
+          id(bri_value) = 0;
+          if (id(constant_light).state) {
+            if (!id(lux).has_state()) return;
+            // Closed loop: start at 50 %, then step up when darker than the target, down when brighter.
+            int cur = id(last_bri_sent) > 0 ? id(last_bri_sent) : 50;
+            float err = id(target_lux).state - id(lux).state;
+            int step = fabsf(err) > 30.0f ? 10 : 5;
+            if (err > 6.0f) cur += step;
+            else if (err < -6.0f) cur -= step;
+            if (cur < 5) cur = 5;
+            if (cur > 100) cur = 100;
+            id(bri_value) = cur;
+            return;
+          }
+          if (!id(lux_brightness).state || !id(lux).has_state()) return;
+          float lo = id(bri_full_lux).state, hi = id(bri_min_lux).state;
+          if (fabsf(hi - lo) < 1.0f) return;
+          float f = (id(lux).state - lo) / (hi - lo);
+          f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+          float minb = id(bri_min_pct).state;
+          float b = 100.0f - f * (100.0f - minb);
+          int rounded = (int) (b / 5.0f + 0.5f) * 5;   // 5 % steps: fewer commands, no visible jitter
+          if (rounded < 1) rounded = 1;
+          if (rounded > 100) rounded = 100;
+          id(bri_value) = rounded;
+  - id: update_strip_brightness
+    then:
+      - if:
+          # Constant light drives each Studio lamp on its own (staged), the room-wide dimming below is the
+          # "Lux brightness" path only.
+          condition:
+            lambda: 'return id(constant_light).state;'
+          then:
+            - script.execute: constant_light_step
+          else:
+            - script.execute: compute_brightness
+            - if:
+                condition:
+                  lambda: |-
+                    auto now = id(local_time).now();
+                    return id(hue_control).state && id(room_dark).state && id(room_occupied).state && now.is_valid() &&
+                           now.hour >= id(allowed_from).state && now.hour < id(allowed_to).state &&
+                           id(hue_armed) && id(bri_value) > 0 &&
+                           (id(constant_light).state ? id(bri_value) != id(last_bri_sent) : abs(id(bri_value) - id(last_bri_sent)) >= 10) &&
+                           (millis() - id(last_bri_ms)) >= 30000;
+                then:
+                  - script.execute:
+                      id: hue_put
+                      target: 0
+                      body: !lambda 'return std::string("{\"dimming\":{\"brightness\":") + std::to_string(id(bri_value)) + "}}";'
+                  - script.wait: hue_put
+                  - logger.log:
+                      format: "Hue: brightness command %d%% (lux %.0f)"
+                      args: ['id(bri_value)', 'id(lux).state']
+                  - lambda: |-
+                      id(last_bri_sent) = id(bri_value);
+                      id(last_bri_ms) = millis();
+
+  # Constant light, staged: with daylight above the target the dimmable lamp alone cannot get the room
+  # down, so the plug lamp must go OFF, then Studio Up dims to 5 %, then the room goes OFF. Getting darker
+  # runs the same stages backwards. Exactly one command per pass (every 30 s at most), first match wins.
+  - id: constant_light_step
+    then:
+      - lambda: |-
+          id(stage_action) = 0;
+          auto now = id(local_time).now();
+          if (!(id(hue_control).state && id(room_dark).state && id(room_occupied).state && now.is_valid() &&
+                now.hour >= id(allowed_from).state && now.hour < id(allowed_to).state &&
+                id(hue_armed) && id(lux).has_state() && (millis() - id(last_bri_ms)) >= 30000)) return;
+          float cur_lux = id(lux).state, tgt = id(target_lux).state;
+          float err = tgt - cur_lux;
+          int step = fabsf(err) > 30.0f ? 10 : 5;
+          if (err < -6.0f) {
+            // Plug OFF only when the room stays above the dead band without it: this guard stops on/off flapping.
+            if (id(plug_on) && (cur_lux - id(plug_gain_lux).state) > (tgt - 6.0f)) {
+              id(stage_action) = 1;
+            } else if (id(up_on) && id(last_bri_sent) > 5) {
+              int b = id(last_bri_sent) - step;
+              id(stage_bri) = b < 5 ? 5 : b;
+              id(stage_action) = 2;
+            } else if (id(up_on) && !id(plug_on)) {
+              id(stage_action) = 3;
+            }
+          } else if (err > 6.0f) {
+            if (!id(up_on)) {
+              id(stage_action) = 4;
+            } else if (id(last_bri_sent) < 100) {
+              int b = id(last_bri_sent) + step;
+              id(stage_bri) = b > 100 ? 100 : b;
+              id(stage_action) = 2;
+            } else if (!id(plug_on)) {
+              id(stage_action) = 5;
+            }
+          }
+      - if:
+          condition:
+            lambda: 'return id(stage_action) == 1;'
+          then:
+            - script.execute:
+                id: hue_put
+                target: 2
+                body: '{"on":{"on":false}}'
+            - script.wait: hue_put
+            - logger.log:
+                format: "Constant light: plug lamp OFF (lux %.0f)"
+                args: ['id(lux).state']
+            - lambda: |-
+                id(plug_on) = false;
+                id(last_bri_ms) = millis();
+      - if:
+          condition:
+            lambda: 'return id(stage_action) == 2;'
+          then:
+            - script.execute:
+                id: hue_put
+                target: 1
+                body: !lambda 'return std::string("{\"dimming\":{\"brightness\":") + std::to_string(id(stage_bri)) + "}}";'
+            - script.wait: hue_put
+            - logger.log:
+                format: "Constant light: Studio Up %d%% (lux %.0f)"
+                args: ['id(stage_bri)', 'id(lux).state']
+            - lambda: |-
+                id(last_bri_sent) = id(stage_bri);
+                id(last_bri_ms) = millis();
+      - if:
+          condition:
+            lambda: 'return id(stage_action) == 3;'
+          then:
+            # Room URL, not the lamp URL: covers both lamps, so reality matches the state even if a lamp drifted.
+            - script.execute:
+                id: hue_put
+                target: 0
+                body: '{"on":{"on":false}}'
+            - script.wait: hue_put
+            - logger.log:
+                format: "Constant light: Studio Up at minimum (5 percent) and still too bright, room OFF (lux %.0f)"
+                args: ['id(lux).state']
+            - lambda: |-
+                id(up_on) = false;
+                id(last_bri_sent) = 0;
+                id(last_bri_ms) = millis();
+      - if:
+          condition:
+            lambda: 'return id(stage_action) == 4;'
+          then:
+            - script.execute:
+                id: hue_put
+                target: 1
+                body: '{"on":{"on":true},"dimming":{"brightness":5}}'
+            - script.wait: hue_put
+            - logger.log:
+                format: "Constant light: Studio Up ON at 5 percent (lux %.0f)"
+                args: ['id(lux).state']
+            - lambda: |-
+                id(up_on) = true;
+                id(last_bri_sent) = 5;
+                id(last_bri_ms) = millis();
+      - if:
+          condition:
+            lambda: 'return id(stage_action) == 5;'
+          then:
+            - script.execute:
+                id: hue_put
+                target: 2
+                body: '{"on":{"on":true}}'
+            - script.wait: hue_put
+            - logger.log:
+                format: "Constant light: Studio Up at full (100 percent) and still too dark, plug lamp ON (lux %.0f)"
+                args: ['id(lux).state']
+            - lambda: |-
+                id(plug_on) = true;
+                id(last_bri_ms) = millis();
+
+interval:
+  - interval: 90s
+    then:
+      - lambda: |-
+          if (!id(hue_armed)) {
+            id(hue_armed) = true;
+            id(hue_on_if_wanted).execute();
+          }
+  - interval: 5s
+    then:
+      - script.execute: update_strip_brightness
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: "Presence"
+      id: radar_presence
+    has_moving_target:
+      name: "Moving"
+    has_still_target:
+      name: "Still"
+
+  # Somebody is in the room. The radar drops out for seconds to minutes when a person sits still
+  # (logs 4 to 6 Nov 2026), so "empty" only counts after the "Empty delay" slider (minutes).
+  - platform: template
+    name: "Room occupied"
+    id: room_occupied
+    lambda: 'return id(radar_presence).state;'
+    filters:
+      - delayed_off: !lambda "return (uint32_t)(id(empty_delay).state * 60000);"
+    on_press:
+      - script.execute: hue_on_if_wanted
+    on_release:
+      - if:
+          condition:
+            lambda: 'return id(hue_armed) && id(hue_control).state;'
+          then:
+            - logger.log: "Empty: switching Hue room OFF"
+            - lambda: |-
+                id(last_bri_sent) = 0;
+                id(plug_on) = false;
+                id(up_on) = false;
+            - script.execute:
+                id: hue_put
+                target: 0
+                body: '{"on":{"on":false}}'
+            - script.wait: hue_put
+
+  # Dark / bright with a gap (hysteresis) and a 5 minute settle time, so passing clouds do nothing.
+  - platform: template
+    name: "Room is dark"
+    id: room_dark
+    lambda: |-
+      if (!id(lux).has_state()) return {};
+      if (id(lux).state < id(lux_on_below).state) return true;
+      if (id(lux).state > id(lux_off_above).state) return false;
+      return id(room_dark).state;   // between the two numbers: keep the last answer
+    filters:
+      # Delays read the "Dark delay" slider so they can be tuned live (bench test: 10 s).
+      - delayed_on: !lambda "return (uint32_t)(id(dark_delay).state * 1000);"
+      - delayed_off: !lambda "return (uint32_t)(id(dark_delay).state * 1000);"
+    on_press:
+      - script.execute: hue_on_if_wanted
+    on_release:
+      - if:
+          condition:
+            lambda: 'return id(hue_armed) && id(hue_control).state;'
+          then:
+            - logger.log: "Bright: switching Hue room OFF"
+            - lambda: |-
+                id(last_bri_sent) = 0;
+                id(plug_on) = false;
+                id(up_on) = false;
+            - script.execute:
+                id: hue_put
+                target: 0
+                body: '{"on":{"on":false}}'
+            - script.wait: hue_put
+
+# LD2410C presence radar: 5 V power, 3.3 V signals. Radar TX goes to GPIO16, radar RX to GPIO17.
+# The 20x4 LCD is NOT in this firmware (full config in light-sensor.yaml.with-lcd-radar).
+uart:
+  id: radar_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 256000
+  parity: NONE
+  stop_bits: 1
+
+ld2410:
+  uart_id: radar_uart
