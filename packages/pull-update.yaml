@@ -47,6 +47,14 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
+# Shows the running firmware version (the release tag) on the device page, so an update is easy to see.
+text_sensor:
+  - platform: template
+    name: "Firmware version"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return {"${fw_version}"};'
+
 button:
   - platform: template
     name: "Check for update"
