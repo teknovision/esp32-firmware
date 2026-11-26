@@ -1,12 +1,16 @@
 # Shared package: the device pulls its own firmware updates from a manifest URL (no push OTA, no OTA password).
 # The device must set these substitutions: project_name (needs a dot, for example "teknovision.lighty")
-# and update_manifest_url. Optional: fw_version (CI sets it to the release tag), verify_ssl.
+# and update_manifest_url. Optional: fw_version (CI derives it from the release tag, v2026.11.25-1 becomes
+# 2026.11.25.1), verify_ssl.
 #
-# How an update is found: the "Firmware" entity reads the manifest every 6 h. An update is available when the
-# manifest "version" is a different string from fw_version below (exact compare, not "newer than").
+# How an update is found: the "Firmware" entity reads the manifest every 6 h. An update is offered when the
+# manifest "version" is a different string from fw_version below. The device then refuses to install it if it is
+# older than the running version (downgrade protection in the device yaml).
 
 substitutions:
-  fw_version: "dev"
+  # Downgrade protection needs a dotted-numeric version, so "dev" is no longer allowed. 0.0.0 is lower than any
+  # real release, so a local build never blocks the next release from installing.
+  fw_version: "0.0.0"
   verify_ssl: "true"
 
 esphome:
@@ -47,7 +51,7 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
-# Shows the running firmware version (the release tag) on the device page, so an update is easy to see.
+# Shows the running firmware version (derived from the release tag) on the device page, so an update is easy to see.
 text_sensor:
   - platform: template
     name: "Firmware version"

@@ -1,5 +1,12 @@
-# Never commit secrets (this repo should not need any)
+# Never commit secrets
 secrets.yaml
+
+# OTA signing key (private). Lives only on the build machine and in the GitHub secret OTA_SIGNING_KEY.
+# Everything in keys/ is ignored, so no key file can be added by accident.
+keys/
+*.pem
+# ota-public-key.pub is the PUBLIC half (raw 64 bytes) and must be committed: CI checks every build against it.
+# It ends in .pub, not .bin, because of the *.bin rule below.
 
 # ESPHome build folders (created next to each device yaml)
 .esphome/

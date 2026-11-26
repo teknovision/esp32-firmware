@@ -32,6 +32,17 @@ esp32:
   variant: esp32
   framework:
     type: esp-idf
+    advanced:
+      # The firmware file is public, so an update must prove it came from us: the build signs it with the private
+      # key and the device refuses any update (also a captive portal upload) not signed by that key. ecdsa_v1
+      # because the chip revision is unknown and it works on every ESP32 revision. No eFuse is burned, so a lost
+      # key only means one USB reflash with a new key. The path is relative to this file; keys/ is git-ignored.
+      signed_ota_verification:
+        signing_scheme: ecdsa_v1
+        signing_key: ../keys/signing_key.pem
+      # Refuses an older version, so an old but validly signed release cannot be replayed onto the device.
+      # Needs a dotted-numeric project version (CI derives it from the tag).
+      enable_ota_downgrade_protection: true
 
 logger:
 

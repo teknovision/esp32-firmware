@@ -1,7 +1,13 @@
 # Builds every devices/*.yaml and publishes the firmware on GitHub Pages:
 #   https://<owner>.github.io/<repo>/firmware/<device>/manifest.json  (+ the .ota.bin next to it)
-# Devices poll that manifest and install a build whose version (= the release tag) differs from their own.
-# No secrets are used: the firmware contains none, Wi-Fi and Hue settings are entered on the device.
+# Devices poll that manifest and install a build whose version differs from their own, unless it is older
+# (downgrade protection). The version is derived from the tag: v2026.11.25-1 becomes 2026.11.25.1.
+# Two secrets are used, only in the build job:
+#   OTA_SIGNING_KEY: the private OTA signing key (PEM). It signs the firmware and is deleted after the build.
+#   Every build is checked against the committed ota-public-key.pub, the key the devices trust.
+#   WEB_PASSWORD: the device web page password (16 to 64 letters or digits). It is compiled into the public
+#   firmware file, so it only keeps out casual LAN users and websites.
+# Wi-Fi and Hue settings are still entered on the device, never built in.
 # Every action is pinned by full commit SHA, the tag is in the comment.
 
 name: Release firmware
@@ -29,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      fw_version: ${{ steps.meta.outputs.fw_version }}
       release_url: ${{ steps.meta.outputs.release_url }}
       devices: ${{ steps.devices.outputs.devices }}
     steps:
@@ -48,11 +55,15 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           tag="${RELEASE_TAG:-$INPUT_TAG}"
-          # Letters, digits, dot, dash, underscore only (it becomes esphome.project.version in the firmware).
-          if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
-            echo "::error::Tag '$tag' is not allowed. Use something like v2026.11.24-1."
+          # The firmware version is derived from the tag and compared on the device group by group as uint32, and
+          # the image version field holds 32 bytes. This shape keeps every group small and the version short.
+          if ! [[ "$tag" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-[0-9]{1,3})?$ ]]; then
+            echo "::error::Tag '$tag' is not allowed. Use v<year>.<month>.<day> with an optional -<1 to 3 digits>, for example v2026.11.24-1."
             exit 1
           fi
+          # Downgrade protection needs a dotted-numeric version: drop the leading "v", turn "-" into ".".
+          fw_version="${tag#v}"
+          fw_version="${fw_version//-/.}"
           # A manual run must build an existing tag, never the branch it was started from.
           if ! git rev-parse -q --verify "refs/tags/$tag^{commit}" > /dev/null; then
             echo "::error::Tag '$tag' does not exist in $REPO. Create the tag (or the release) first."
@@ -61,11 +72,24 @@ jobs:
           # Read the device list from the tag, not from the branch.
           git checkout -q --detach "refs/tags/$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "fw_version=$fw_version" >> "$GITHUB_OUTPUT"
+          echo "Firmware version: $fw_version"
           echo "release_url=$SERVER_URL/$REPO/releases/tag/$tag" >> "$GITHUB_OUTPUT"
 
       - name: List devices
         id: devices
         run: |
+          set -euo pipefail
+          # build-action pastes the yaml path unquoted into its docker command, so names are kept to a safe set.
+          # A glob (with dot files) sees every name exactly as find does below, spaces and line breaks included.
+          shopt -s nullglob dotglob
+          for f in devices/*.yaml; do
+            name="$(basename "$f" .yaml)"
+            if ! [[ "$name" =~ ^[a-z0-9-]+$ ]]; then
+              echo "::error::Device file 'devices/$name.yaml' has a name other than lowercase letters, digits and '-'. Rename it."
+              exit 1
+            fi
+          done
           devices=$(find devices -maxdepth 1 -name '*.yaml' -exec basename {} .yaml \; | sort | jq -R . | jq -cs .)
           if [ "$devices" = "[]" ]; then
             echo "::error::No devices/*.yaml found"
@@ -82,28 +106,84 @@ jobs:
       matrix:
         device: ${{ fromJSON(needs.prepare.outputs.devices) }}
     steps:
+      # Before anything else, so a missing secret stops the run before any work is done.
+      - name: Check the web password secret
+        env:
+          WEB_PASSWORD: ${{ secrets.WEB_PASSWORD }}
+        run: |
+          if [ -z "${WEB_PASSWORD:-}" ]; then
+            echo "::error::The GitHub secret WEB_PASSWORD is empty or missing. Add it under Settings, Secrets and variables, Actions."
+            exit 1
+          fi
+          # ESPHome expands $name, ${...} and Jinja inside command-line substitution values, and build-action
+          # prints the effective value. Anything but plain letters and digits could change the password or defeat
+          # GitHub's log masking, so only those are allowed.
+          if ! [[ "$WEB_PASSWORD" =~ ^[A-Za-z0-9]{16,64}$ ]]; then
+            echo "::error::The GitHub secret WEB_PASSWORD must be 16 to 64 letters or digits (A-Z, a-z, 0-9), nothing else."
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           persist-credentials: false
+
+      # The device yaml reads ../keys/signing_key.pem, relative to devices/. build-action mounts the workspace
+      # into the ESPHome container at /github/workspace and builds from there, so this path is visible to it.
+      - name: Write the OTA signing key
+        env:
+          # Passed through env, never pasted into the script.
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OTA_SIGNING_KEY:-}" ]; then
+            echo "::error::The GitHub secret OTA_SIGNING_KEY is empty or missing. Add the PEM text of keys/signing_key.pem under Settings, Secrets and variables, Actions."
+            exit 1
+          fi
+          umask 077
+          mkdir -p keys
+          printf '%s\n' "$OTA_SIGNING_KEY" > keys/signing_key.pem
 
       - name: Build firmware
         id: build
         uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
         with:
           yaml-file: devices/${{ matrix.device }}.yaml
-          version: "2026.9.1" # ESPHome version, pinned
+          # ESPHome version pinned by tag and image digest; build-action pastes this into
+          # "docker pull ghcr.io/esphome/esphome:<version>". To refresh the digest:
+          #   docker buildx imagetools inspect ghcr.io/esphome/esphome:<version>   (use the top "Digest:" line)
+          version: "2026.9.1@sha256:776a845d508909bf426d2ee7bdd81796361ebe6a7f091807ce1d6d0b48985413"
           complete-manifest: true
           release-url: ${{ needs.prepare.outputs.release_url }}
           substitutions: |
-            fw_version=${{ needs.prepare.outputs.tag }}
+            fw_version=${{ needs.prepare.outputs.fw_version }}
+            web_password=${{ secrets.WEB_PASSWORD }}
+
+      # The build was the last use of the private key.
+      - name: Delete the OTA signing key
+        if: always()
+        run: |
+          rm -f keys/signing_key.pem
+          if [ -e keys/signing_key.pem ]; then
+            echo "::error::Could not delete keys/signing_key.pem"
+            exit 1
+          fi
+
+      # Exact version (the one used for the local builds), in its own venv so the runner's system Python is
+      # untouched. Installed only after the private key is gone, so this code never sees it.
+      - name: Install espsecure (esptool, pinned)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/esptool"
+          "$RUNNER_TEMP/esptool/bin/pip" install --disable-pip-version-check --quiet esptool==5.3.1
+          "$RUNNER_TEMP/esptool/bin/espsecure" version
 
       - name: Stage manifest and OTA file
         env:
           DEVICE: ${{ matrix.device }}
           # build-action writes its output to a folder named after its "name" output (device name + variant).
           OUT: ${{ steps.build.outputs.name }}
-          TAG: ${{ needs.prepare.outputs.tag }}
+          FW_VERSION: ${{ needs.prepare.outputs.fw_version }}
         run: |
           set -euo pipefail
           dest="site/firmware/$DEVICE"
@@ -111,12 +191,13 @@ jobs:
           cp "$OUT/manifest.json" "$dest/manifest.json"
           cp "$OUT/$OUT.ota.bin" "$dest/"
           # The device resolves a relative ota.path next to manifest.json, so the file must sit right there,
-          # its MD5 must match, and the manifest version must be this tag.
-          python3 - "$dest" "$TAG" <<'EOF'
+          # its MD5 must match (build-action hashes the signed firmware.ota.bin) and the manifest version must be
+          # the version derived from the tag.
+          python3 - "$dest" "$FW_VERSION" <<'EOF'
           import hashlib, json, os, sys
-          dest, tag = sys.argv[1], sys.argv[2]
+          dest, fw_version = sys.argv[1], sys.argv[2]
           m = json.load(open(os.path.join(dest, "manifest.json")))
-          assert m["version"] == tag, f"manifest version {m['version']!r} is not the tag {tag!r}"
+          assert m["version"] == fw_version, f"manifest version {m['version']!r} is not {fw_version!r}"
           assert m["builds"], "manifest has no builds"
           for b in m["builds"]:
               ota = b["ota"]
@@ -129,6 +210,54 @@ jobs:
               print(f"OK {b['chipFamily']}: {path} md5 {md5}")
           EOF
           ls -l "$dest"
+
+      # Checks against ota-public-key.pub from the checked-out tag, the key the devices already trust, not against
+      # whatever key is in the secret. A wrong secret therefore fails here instead of publishing a build that every
+      # device would refuse.
+      - name: Check the OTA signature
+        env:
+          DEVICE: ${{ matrix.device }}
+        run: |
+          set -euo pipefail
+          pub=ota-public-key.pub
+          if [ ! -f "$pub" ]; then
+            echo "::error::$pub is missing from the tag. It is the public key the devices trust; commit it."
+            exit 1
+          fi
+          size=$(wc -c < "$pub" | tr -d ' ')
+          if [ "$size" -ne 64 ]; then
+            echo "::error::$pub is $size bytes, expected exactly 64 (raw ecdsa_v1 public key from espsecure extract-public-key --version 1)."
+            exit 1
+          fi
+          shopt -s nullglob
+          files=(site/firmware/"$DEVICE"/*.ota.bin)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No .ota.bin staged for $DEVICE"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if ! "$RUNNER_TEMP/esptool/bin/espsecure" verify-signature --version 1 --keyfile "$pub" "$f"; then
+              echo "::error::$f does not verify against $pub: the OTA_SIGNING_KEY secret does not match ota-public-key.pub, so devices would refuse this build."
+              exit 1
+            fi
+          done
+
+      # The firmware itself contains the bare PEM header texts of its TLS library, each followed by a zero byte,
+      # so a plain search for "PRIVATE KEY" would always hit. Only a header followed by key text counts as a leak.
+      - name: Make sure no private key is published
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import pathlib, re, sys
+          pem_block = re.compile(rb"-{5}BEGIN [A-Z ]*PRIVATE KEY-{5}\s*[A-Za-z0-9+/=]{16}")
+          bad = [str(p) for p in pathlib.Path("site").rglob("*")
+                 if p.is_file() and (p.suffix.lower() == ".pem" or pem_block.search(p.read_bytes()))]
+          if bad:
+              for p in bad:
+                  print(f"::error::{p} is a .pem file or contains a private key")
+              sys.exit(1)
+          print("No private key under site/")
+          EOF
 
       - name: Keep staged files for the deploy job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
