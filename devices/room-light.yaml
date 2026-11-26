@@ -15,9 +15,10 @@ substitutions:
   allowed_to_hour: "23"
   project_name: "teknovision.lighty"
   update_manifest_url: "https://teknovision.github.io/esp32-firmware/firmware/room-light/manifest.json"
-  # The Hue bridge uses its own private certificate, so certificate checks are off. http_request has one
-  # verify_ssl for the whole device, so this ALSO means the firmware download from GitHub Pages is not
-  # certificate-checked. The MD5 in the manifest only proves the file arrived whole, not who made it.
+  # verify_ssl only covers http_request, which now does nothing but the manifest and firmware download from
+  # GitHub Pages: that download is not certificate-checked. The MD5 in the manifest only proves the file arrived
+  # whole; the OTA signature proves who made it. The Hue calls do not use http_request: hue_tls.h checks the
+  # bridge certificate against the Hue roots and the "Hue bridge id" (README, "Custom code: verified Hue calls").
   verify_ssl: "false"
 
 packages:
@@ -27,6 +28,9 @@ packages:
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  # Verified Hue requests (custom code, see the README section "Custom code: verified Hue calls").
+  includes:
+    - hue_tls.h
 
 esp32:
   variant: esp32
@@ -50,7 +54,7 @@ logger:
 # the "Hue key". Without an api block there is also no 15 min "no client" reboot (that reboot wiped the
 # "Room occupied" countdown on 12 Nov 2026). Adding Home Assistant later needs a new API design first.
 
-# OTA, Wi-Fi, captive portal and http_request come from the two packages above.
+# OTA, Wi-Fi, captive portal and http_request come from the two packages above. The Hue calls use hue_tls.h.
 
 # Small status page on the board itself: http://room-light.local ("ota: false" comes from runtime-wifi.yaml)
 web_server:
@@ -338,11 +342,12 @@ number:
 # either length makes the board forget the value (it must then be typed in again). Keep them fixed.
 # "Hue key" is a password field: the web page and its event stream only ever show "********".
 text:
-  # Changing the bridge clears the key, so a LAN user cannot point the board at their own host and receive the
-  # key there (certificates are not checked). set_action runs before the new value is stored, so .state still
+  # Changing the bridge clears the key, so whoever changes where the key goes must also know the key. The
+  # certificate check (bridge id, hue_tls.h) already stops the key going to a host that is not the bridge; this
+  # is the second line of defence. set_action runs before the new value is stored, so .state still
   # holds the old bridge here; optimistic + restore_value still publish and save the new bridge afterwards.
   # Restoring from flash at boot does not run set_action. Any change, also the first entry, clears the key:
-  # always set the bridge first, then the key.
+  # always set the bridge first, then the bridge id, then the key.
   - platform: template
     name: "Hue bridge"
     id: hue_bridge
@@ -356,6 +361,27 @@ text:
       - lambda: |-
           if (x != id(hue_bridge).state && !id(hue_key).state.empty()) {
             ESP_LOGW("hue", "Hue bridge changed: Hue key cleared, enter the Hue key again");
+            auto call = id(hue_key).make_call();
+            call.set_value("");
+            call.perform();
+          }
+  # The 16 hex characters of the bridge ("bridgeid" at https://discovery.meethue.com or in the Hue app). The
+  # bridge certificate must carry this name, so only that one bridge gets the key. Any change clears the key:
+  # someone with the page login could otherwise pair a changed id with an impersonated address (a device holding
+  # a genuine certificate of another Hue bridge) and receive the key. Same set_action rules as "Hue bridge".
+  - platform: template
+    name: "Hue bridge id"
+    id: hue_bridge_id
+    mode: text
+    min_length: 0
+    max_length: 16
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    set_action:
+      - lambda: |-
+          if (x != id(hue_bridge_id).state && !id(hue_key).state.empty()) {
+            ESP_LOGW("hue", "Hue bridge id changed: Hue key cleared, enter the Hue key again");
             auto call = id(hue_key).make_call();
             call.set_value("");
             call.perform();
@@ -399,6 +425,43 @@ text:
     optimistic: true
     restore_value: true
     entity_category: config
+
+# Proves the verified Hue link on the device page without switching a lamp. "Hue link" shows the result of the
+# last Hue request in a few words ("ok, HTTP 200", "HTTP 403", "certificate rejected", "bridge not reachable",
+# "not configured" ...) and never a secret.
+text_sensor:
+  - platform: template
+    name: "Hue link"
+    id: hue_link
+    entity_category: diagnostic
+
+button:
+  # One read-only GET of /clip/v2/resource/bridge (changes nothing on the bridge) through the same verified
+  # request as the Hue commands, key included, so a wrong key shows as "HTTP 403".
+  - platform: template
+    name: "Test Hue link"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          // Same bridge clean-up as hue_put.
+          std::string host = id(hue_bridge).state;
+          if (host.rfind("https://", 0) == 0) host.erase(0, 8);
+          else if (host.rfind("http://", 0) == 0) host.erase(0, 7);
+          while (!host.empty() && host.back() == '/') host.pop_back();
+          if (host.empty() || id(hue_key).state.empty()) {
+            ESP_LOGW("hue", "Test Hue link: Hue bridge or Hue key is empty: nothing sent");
+            id(hue_link).publish_state("not configured");
+            return;
+          }
+          if (!hue_tls::valid_bridge_id(id(hue_bridge_id).state)) {
+            ESP_LOGW("hue", "Hue bridge id missing or not 16 hex characters: nothing sent");
+            id(hue_link).publish_state("not configured");
+            return;
+          }
+          hue_tls::Result r = hue_tls::request(host, id(hue_bridge_id).state, id(hue_key).state, HTTP_METHOD_GET,
+                                               "bridge", "");
+          ESP_LOGI("hue", "Test Hue link: %s", hue_tls::describe(r).c_str());
+          id(hue_link).publish_state(hue_tls::describe(r));
 
 switch:
   - platform: ld2410
@@ -463,6 +526,10 @@ globals:
   - id: hue_warned
     type: bool
     initial_value: 'false'
+  # True after the "Hue bridge id missing or not 16 hex characters" warning was logged once (reset when the id is valid).
+  - id: hue_id_warned
+    type: bool
+    initial_value: 'false'
   # "Hue bridge" without a leading https:// or http:// and without trailing "/" (set by hue_put before each request).
   - id: hue_host
     type: std::string
@@ -475,6 +542,9 @@ script:
   # hue-application-key header. Callers run "script.wait" right after, so commands and state updates keep the
   # same order as when the request was inline. If the bridge, the key or the needed id is empty, nothing is
   # sent and one warning is logged; it can show again only after all five Hue settings were complete once.
+  # The request runs through hue_tls::request (hue_tls.h): the bridge certificate must chain to a Hue root and
+  # carry the "Hue bridge id", else nothing is sent. Without a 16 hex character bridge id nothing is sent and one
+  # warning is logged. Every request (and every skip) updates the "Hue link" text sensor.
   - id: hue_put
     mode: queued
     parameters:
@@ -494,33 +564,44 @@ script:
               bool all_set = !host.empty() && !id(hue_key).state.empty() && !id(hue_room_id).state.empty() &&
                              !id(hue_up_light_id).state.empty() && !id(hue_plug_light_id).state.empty();
               if (all_set) id(hue_warned) = false;
+              const bool id_ok = hue_tls::valid_bridge_id(id(hue_bridge_id).state);
+              if (id_ok) id(hue_id_warned) = false;
               // Hue ids are UUIDs: only letters, digits and '-'. Anything else (for example "../") could point the
               // request with the real key at a different bridge resource, so it is refused. The text "pattern"
               // option is only a browser hint in 2026.9.1 (text_call.cpp checks length only), hence this check.
               for (char c : res) {
                 if (!isalnum((unsigned char) c) && c != '-') {
                   ESP_LOGW("hue", "Hue id contains a character other than letters, digits or '-': request skipped");
+                  id(hue_link).publish_state("not configured");
                   return false;
                 }
               }
-              if (!host.empty() && !id(hue_key).state.empty() && !res.empty()) return true;
+              if (!host.empty() && !id(hue_key).state.empty() && !res.empty()) {
+                if (id_ok) return true;
+                // No name to check the bridge certificate against, so the key must not be sent.
+                if (!id(hue_id_warned)) {
+                  ESP_LOGW("hue", "Hue bridge id missing or not 16 hex characters: nothing sent");
+                  id(hue_id_warned) = true;
+                }
+                id(hue_link).publish_state("not configured");
+                return false;
+              }
               if (!id(hue_warned)) {
                 ESP_LOGW("hue", "Hue settings missing (Hue bridge, Hue key or a Hue id is empty): Hue commands are skipped");
                 id(hue_warned) = true;
               }
+              id(hue_link).publish_state("not configured");
               return false;
           then:
-            - http_request.send:
-                method: PUT
-                url: !lambda |-
-                  std::string url = "https://" + id(hue_host) + "/clip/v2/resource/";
-                  if (target == 1) return url + "light/" + id(hue_up_light_id).state;
-                  if (target == 2) return url + "light/" + id(hue_plug_light_id).state;
-                  return url + "grouped_light/" + id(hue_room_id).state;
-                request_headers:
-                  Content-Type: application/json
-                  hue-application-key: !lambda 'return id(hue_key).state.c_str();'
-                body: !lambda 'return body;'
+            - lambda: |-
+                // Same resource paths as the earlier http_request URL: https://<host>/clip/v2/resource/<path>.
+                std::string path;
+                if (target == 1) path = "light/" + id(hue_up_light_id).state;
+                else if (target == 2) path = "light/" + id(hue_plug_light_id).state;
+                else path = "grouped_light/" + id(hue_room_id).state;
+                hue_tls::Result r = hue_tls::request(id(hue_host), id(hue_bridge_id).state, id(hue_key).state,
+                                                     HTTP_METHOD_PUT, path, body);
+                id(hue_link).publish_state(hue_tls::describe(r));
 
   # Lights ON only when: Hue control on, room dark, somebody in the room, inside the allowed hours.
   - id: hue_on_if_wanted

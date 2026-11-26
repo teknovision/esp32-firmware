@@ -11,6 +11,8 @@ substitutions:
   # Downgrade protection needs a dotted-numeric version, so "dev" is no longer allowed. 0.0.0 is lower than any
   # real release, so a local build never blocks the next release from installing.
   fw_version: "0.0.0"
+  # One switch for every http_request call of the device: here the manifest and firmware download. A device that
+  # sets it to false (Lighty) downloads both without certificate checks and relies on the OTA signature.
   verify_ssl: "true"
 
 esphome:

@@ -5,7 +5,7 @@ This repo holds the ESPHome firmware for my ESP32 devices. The first device is L
 No file in this repo holds a secret. There is no Wi-Fi password, no OTA password and no API key in any file. Two secrets are used only at build time: the OTA signing key and the web page password (see "Signed updates" and "Accepted risks"). Each device gets its settings at runtime:
 
 - Wi-Fi is entered once through a setup hotspot. The device keeps it across firmware updates.
-- Device settings (for Lighty: the Hue bridge, key and ids) are typed on the device web page. They are kept in flash.
+- Device settings (for Lighty: the Hue bridge, bridge id, key and ids) are typed on the device web page. They are kept in flash.
 
 Updates are pulled, not pushed. A GitHub release builds the firmware and puts it on GitHub Pages. Each device checks its manifest every 6 hours and installs a new build on its own.
 
@@ -15,7 +15,8 @@ ESPHome version: 2026.9.1, framework esp-idf.
 
 - `packages/pull-update.yaml`: shared. Project name and version, the "Firmware" update entity, the "Auto update" switch, the "Check for update" button, http_request and OTA by http_request only.
 - `packages/runtime-wifi.yaml`: shared. Wi-Fi with no network in the file, the open `<name>-setup` hotspot, the captive portal and the web page with its login (`web_server: ota: false`, `auth:`, `local: true`).
-- `devices/<device>.yaml`: one file per device. The release workflow builds every file in this folder. Each device turns on signed updates and downgrade protection under `esp32: framework: advanced:`.
+- `devices/<device>.yaml`: one file per device. The release workflow builds every `.yaml` file in this folder. Each device turns on signed updates and downgrade protection under `esp32: framework: advanced:`.
+- `devices/hue_tls.h`: Lighty only. The verified Hue requests and the two Hue root certificates, included from `devices/room-light.yaml` (see "Custom code: verified Hue calls").
 - `keys/signing_key.pem`: the private OTA signing key. Never in git (`keys/` and `*.pem` are ignored). Only on the build machine and in the GitHub secret `OTA_SIGNING_KEY`.
 - `ota-public-key.pub`: the public half of that key (raw 64 bytes). Public, committed on purpose.
 - `.github/workflows/release.yml`: builds, signs and publishes on each GitHub release.
@@ -96,8 +97,9 @@ A build without `web_password` fails on purpose. A local build has version `0.0.
 2. The device finds no Wi-Fi and opens the hotspot `<name>-setup` (no password). Join it with a phone. The setup page opens by itself, or go to http://192.168.4.1.
 3. Pick your Wi-Fi and enter its password. The device restarts and joins it.
 4. Open `http://<name>.local` and log in (user `admin`, the web password). Fill in the config texts in the Configuration section.
-   For Lighty: "Hue bridge" (IP or host name), "Hue key" (the Hue application key), "Hue room id" (the grouped_light id of the room), "Hue Up light id" and "Hue plug light id". Until the bridge and key are filled in, Lighty sends nothing to Hue and logs one warning. Fill in the bridge before the key.
-   Changing "Hue bridge" later clears "Hue key" on purpose. Enter the key again after every bridge change.
+   For Lighty: "Hue bridge" (IP or host name), "Hue bridge id", "Hue key" (the Hue application key), "Hue room id" (the grouped_light id of the room), "Hue Up light id" and "Hue plug light id". "Hue bridge id" is the 16 characters shown as `bridgeid` at https://discovery.meethue.com or in the Hue app. Upper or lower case both work. Until the bridge, the bridge id and the key are filled in, Lighty sends nothing to Hue and logs one warning. Fill them in in this order: bridge, then bridge id, then key.
+   Changing "Hue bridge" or "Hue bridge id" later clears "Hue key" on purpose. Enter the key again after every such change.
+   Press "Test Hue link" (Diagnostic section). "Hue link" should show `ok, HTTP 200`. It sends one read-only request and switches no lamp.
 5. From now on the device updates itself.
 
 Moving Lighty from the old `home-sensors/esphome/light-sensor.yaml`: the old firmware had Wi-Fi in the file, so after the first flash of this firmware Lighty has no saved Wi-Fi. Do steps 2 to 4 once. Sliders and switches keep their values because the entity names did not change. The old file stays as the fallback.
@@ -119,9 +121,38 @@ One-time GitHub setup:
 ## Accepted risks
 
 - Open setup hotspot. The device opens `<name>-setup` with no password at once when no Wi-Fi is saved, or after the saved Wi-Fi has been down for 10 minutes (`wifi_ap_timeout`). While it is up it is open. Only the Wi-Fi setup pages (including `/wifisave`) skip the web login, so anyone nearby can join it and set a different Wi-Fi. A device moved to a foreign Wi-Fi sends its next Hue command there, so the Hue key can leak. Kept on purpose (owner decision 26 Nov 2026): a Wi-Fi change needs no cable. A firmware upload on the hotspot is behind the web login and must also be signed with our key. Someone who wants to force the hotspot could jam or deauthenticate the home Wi-Fi. Turning on PMF (802.11w, protected management frames) or WPA3 on the home router makes that much harder.
-- Unverified TLS while `verify_ssl` is false. Lighty needs this for the Hue bridge certificate. ESPHome has one switch for the whole device, so no download is certificate-checked. The firmware is safe anyway: the device checks its signature. The Hue key is not: a device on the LAN that pretends to be the Hue bridge can receive the Hue key with the next Hue command.
-- Web login in a public firmware. The page asks for a login (digest). The password is compiled into the firmware, and the firmware file is public, so anyone who downloads and takes it apart can read the password. Someone who can sniff the LAN can also replay a captured digest login. The login keeps out casual LAN users and websites, not a targeted attacker. Anyone with the password can read the values and change settings, including "Auto update". The "Hue key" is hidden on the web page (shown as `********`, never sent to the browser). There is no native API, so no other way to read it over the network. Pointing "Hue bridge" at another host clears the key first, so it cannot be sent there.
+- Unverified firmware download while `verify_ssl` is false. Lighty keeps `verify_ssl` false, so the manifest and firmware download from GitHub Pages is not certificate-checked. The firmware is safe anyway: the device checks its signature and refuses older versions. A LAN attacker can hide an update or offer a file, which the device then refuses. The Hue calls do not use this switch: they are verified against the Hue root certificates and the "Hue bridge id" (see "Custom code: verified Hue calls"), so a device on the LAN that pretends to be the bridge gets a failed handshake and no Hue key.
+- Web login in a public firmware. The page asks for a login (digest). The password is compiled into the firmware, and the firmware file is public, so anyone who downloads and takes it apart can read the password. Someone who can sniff the LAN can also replay a captured digest login. The login keeps out casual LAN users and websites, not a targeted attacker. Anyone with the password can read the values and change settings, including "Auto update". The "Hue key" is hidden on the web page (shown as `********`, never sent to the browser). There is no native API, so no other way to read it over the network. Pointing "Hue bridge" at another host or changing "Hue bridge id" clears the key first, so it cannot be sent there.
 - Lost signing key. Without `keys/signing_key.pem` no new firmware can be installed over the air. Each device then needs one USB flash with a new key. Keep a safe copy of the key.
+
+## Custom code: verified Hue calls
+
+What it does: Lighty sends every Hue request (the lamp commands and the "Test Hue link" GET of `/clip/v2/resource/bridge`) through its own small helper instead of ESPHome's `http_request`. The helper uses ESP-IDF `esp_http_client` with the two Hue root certificates as `cert_pem` and the "Hue bridge id" as `common_name`. The TLS handshake therefore checks that the bridge certificate chains to a Hue root and that its name (the certificate CN) is the bridge id. Only after that handshake succeeded are the request headers, the `hue-application-key` among them, sent. If the check fails, nothing is sent and "Hue link" shows `certificate rejected`. Redirects are not followed. Why: in ESPHome 2026.9.1 `http_request` has one `verify_ssl` for the whole device and no option to check a certificate whose name differs from the URL host, and the bridge is reached by IP address while its certificate names the bridge id.
+
+Where it is:
+
+- `devices/hue_tls.h`: the root certificates and `hue_tls::request()`, included through `esphome: includes:`.
+- `devices/room-light.yaml`: the `hue_put` script, the "Hue bridge id" text, the "Hue link" text sensor and the "Test Hue link" button.
+
+The two roots (public certificates, both EC P-256 and self-signed):
+
+| Subject | Valid until | SHA-256 fingerprint |
+| --- | --- | --- |
+| C=NL, O=Philips Hue, CN=root-bridge | 2038-01-19 | `F0:BD:8E:65:09:E8:2F:77:4D:63:BC:00:9D:53:88:C9:69:FE:3D:CF:7D:6D:54:1D:63:51:B7:2B:89:8D:8A:CF` |
+| C=NL, O=Signify Hue, CN=Hue Root CA 01 | 2050-12-31 | `D8:B8:94:48:B2:AF:8E:16:76:18:5A:C0:72:19:EE:9D:CB:C8:F0:1C:12:2A:02:6A:2A:4B:7B:5C:FE:03:28:B8` |
+
+They are copied byte for byte from `bundles/org.openhab.binding.hue/src/main/resources/huebridge_cacert.pem` in openhab/openhab-addons (commit f0d1a26ba0, March 2026), because Signify's own download is behind a developer login. Check the fingerprints again with `openssl x509 -noout -fingerprint -sha256` whenever the file is replaced. Certificate dates are not checked in this build (no clock needed), so the expiry dates do not stop the link. The other side of that: neither expiry nor revocation is checked, so if the private key of the pinned bridge ever leaks (for example from a bridge you sold), it stays usable against this device until "Hue bridge id" is changed.
+
+What could break it ("Hue link" shows `certificate rejected` or `TLS handshake failed`, and Lighty sends nothing to Hue):
+
+- A bridge certificate under a new root that is not in `hue_tls.h`. Add the new root after checking its fingerprint from a trusted source.
+- A factory reset or a replaced bridge: new bridge id. Enter the new id, then the key again.
+- The bridge moving to a certificate with SANs (subject alternative names). Then mbedTLS checks only the SANs, not the CN, so the id must be listed there.
+- An ESPHome upgrade past 2026.9.1: `http_request` and the ESP-IDF version change. Check that `esp_http_client` still verifies with `cert_pem` and `common_name` and still writes nothing before the handshake, then press "Test Hue link".
+- Too little free heap during the TLS handshake (the same TLS buffers `http_request` used before). It shows as `TLS handshake failed` in "Hue link" and a memory error in the log.
+- Raising the ESP-IDF log level to DEBUG: `esp_http_client` then logs the request headers, Hue key included. Keep the build default (ERROR).
+
+After the first update to this firmware Lighty sends nothing to Hue until "Hue bridge id" is filled in, and filling it in clears "Hue key", so enter the key again afterwards.
 
 ## Before upgrading ESPHome past 2027.1
 
