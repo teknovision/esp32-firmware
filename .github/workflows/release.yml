@@ -176,7 +176,9 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/esptool"
           "$RUNNER_TEMP/esptool/bin/pip" install --disable-pip-version-check --quiet esptool==5.3.1
-          "$RUNNER_TEMP/esptool/bin/espsecure" version
+          # espsecure 5.x has no version command; a clean help call proves the tool starts.
+          "$RUNNER_TEMP/esptool/bin/pip" show esptool | grep -i '^Version'
+          "$RUNNER_TEMP/esptool/bin/espsecure" -h > /dev/null
 
       - name: Stage manifest and OTA file
         env:
